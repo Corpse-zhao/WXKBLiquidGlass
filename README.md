@@ -1,28 +1,47 @@
-# WeChat Input Method Liquid Glass tweak (experimental)
+# WeChat 输入法键盘 Liquid Glass（实验版 v1.0.0）
 
-Target extension bundle: `com.tencent.wetype.keyboard`  
-Target device: iOS 16.6, arm64/arm64e, rootless Theos package.
+注入目标扩展：`com.tencent.wetype.keyboard`（微信输入法键盘扩展）
+设备环境：**roothide 越狱 / iOS 16.6 / arm64e**
 
-## What it does
-Hooks UIKit keyboard container views in the target keyboard extension and inserts a non-interactive system-material blur behind their content. It keeps the keyboard's existing keys and controls in front.
+## 它做什么
 
-## Important limitations
-- This is source code, not a compiled or device-tested `.deb`.
-- The exact view hierarchy of WeChat Input Method 4.0.0 has not been inspected, so this may need adjustment or may have no visible effect.
-- A system blur is only a starting approximation; it does not reproduce a custom reference design, animated highlights, borders, or custom key styling.
-- The package is rootless. Confirm your RootHide conversion workflow before installing. Remove it immediately if the keyboard becomes unstable.
+Hook `UIInputView` 与 `UIInputSetContainerView` 的 `didMoveToWindow` / `layoutSubviews`，
+在键盘容器最底层插入一层 `UIVisualEffectView`（`UIBlurEffectStyleSystemThinMaterial`，16pt 圆角）。
+玻璃层 `userInteractionEnabled = NO`，按键与触摸派发完全不受影响。
 
-## Build with Theos
-The build environment needs Theos and an iPhoneOS SDK compatible with the selected target. From this folder run:
+## 构建（GitHub Actions 已配好）
+
+- `.github/workflows/build.yml`：macOS runner + `roothide/theos` + `iPhoneOS16.5.sdk`
+- 打包参数：`gmake package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1`
+- 产物：`packages/com.zhao.wxkb-liquid-glass_<ver>_iphoneos-arm64e.deb`
+- CI 内含 Preflight 静态自检 + deb 结构校验（Architecture / 路径前缀 / 双切片）
+
+## 安装
+
+Sileo / Filza 直接打开 deb 安装；或命令行：
 
 ```sh
-make package
+dpkg -i com.zhao.wxkb-liquid-glass_1.0.0_iphoneos-arm64e.deb
+killall -9 WeChat     # 必须让输入法扩展进程重启，否则不会注入
 ```
 
-The package should appear under `packages/`. If your Theos installation uses a different SDK version, adjust `TARGET` in `Makefile` to the installed SDK.
+装完在微信里调起输入法键盘即可。日志确认注入：`log stream | grep WXKBLiquidGlass`。
 
-## Workbuddy / GitHub Actions
-Open this folder as a Theos project in Workbuddy. The included workflow is a starter workflow, but GitHub-hosted macOS runners do not guarantee an iPhoneOS SDK is present. If the build reports missing SDKs, add a permitted SDK installation step or build in your configured Theos environment. Do not upload or redistribute an SDK unless you have permission.
+## 已知限制
 
-## Bundle filter
-The tweak filter targets only `com.tencent.wetype.keyboard`; it does not target the WeChat main app.
+- 系统键盘自带的背板（`UIKBInputBackdropView` / `_UIVisualEffectBackdropView`）在层级上通常
+  **盖在这层玻璃之上**，所以最可能的表现是「装了但看不出变化」。这是已知的实验边界，
+  不是安装失败。要真正生效需再加一层「找到并适度调淡系统背板」的逻辑
+  （必须真机确认层级，调错会把按键一起弄没，故本版刻意不做）。
+- 没有设置面板、没有开关；不喜欢直接卸包。
+- 只在微信输入法键盘扩展内生效，不影响系统键盘与其它 App。
+
+## 目录
+
+```
+Makefile                  # TARGET iphone:clang:16.5:14.0 / ARCHS arm64+arm64e / roothide
+control                   # Architecture: iphoneos-arm64e
+Tweak.xm                  # 全部逻辑（2 个 %hook）
+WXKBLiquidGlass.plist     # MobileSubstrate filter（Bundles = com.tencent.wetype.keyboard）
+.github/workflows/build.yml
+```
