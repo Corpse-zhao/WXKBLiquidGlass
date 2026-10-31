@@ -3,11 +3,19 @@
 注入目标扩展：`com.tencent.wetype.keyboard`（微信输入法键盘扩展）
 设备环境：**roothide 越狱 / iOS 16.6 / arm64e**
 
-## 它做什么
+## 它做什么（v1.1.0 换思路）
 
-Hook `UIInputView` 与 `UIInputSetContainerView` 的 `didMoveToWindow` / `layoutSubviews`，
-在键盘容器最底层插入一层 `UIVisualEffectView`（`UIBlurEffectStyleSystemThinMaterial`，16pt 圆角）。
-玻璃层 `userInteractionEnabled = NO`，按键与触摸派发完全不受影响。
+v1.0.0 只是往键盘容器最底层插玻璃，被系统背板盖住看不见。v1.1.0 按「玻璃层必须在
+**所有背景之上、所有按键之下**」重构：
+
+1. `UIInputView` / `UIInputSetHostView` 的 `layoutSubviews` 当锚点（带重入闸，防布局死循环）
+2. **递归 BFS** 找原生背板（类名含 `Backdrop`、宽度铺满 ≥80% 屏宽、子树里没有按键内容）
+3. 双门槛安全阀：**只有「子树里没有 Keyplane/KeyView」的背板才允许 alpha 归零**，
+   否则会把按键一起藏掉、键盘直接点不动
+4. 玻璃层插到「最靠上的按键层下面」；没有按键层就插最底层（宁可看不见，绝不盖按键）
+5. veil 底色 30% 白 —— 背板藏掉后底色全靠它撑，太淡会看不清按键字
+6. 收起态自动 `hidden = YES`；`%ctor` 后 0.4s / 1.2s / 2.5s 补扫 + 跟随键盘通知
+7. 每次结构变化打一行探针：`install host=… parent=… backdrops=N hidden=N | [0]类名:bg? [1]类名:keys …`
 
 ## 构建（GitHub Actions 已配好）
 
