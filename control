@@ -1,0 +1,9 @@
+Package: com.zhao.wxkb-liquid-glass
+Name: WeChat Keyboard Liquid Glass
+Version: 1.0.0
+Architecture: iphoneos-arm64e
+Description: Experimental translucent styling for the WeChat keyboard extension.
+Maintainer: Corpse-zhao
+Author: Corpse-zhao
+Section: Tweaks
+Depends: mobilesubstrate

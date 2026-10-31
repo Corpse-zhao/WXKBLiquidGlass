@@ -1,0 +1,157 @@
+name: Build tweak
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build tools
+        run: |
+          brew install make ldid xz || true
+          echo "$(brew --prefix)/opt/make/libexec/gnubin" >> "$GITHUB_PATH"
+
+      - name: Install Theos (roothide fork)
+        run: |
+          set -e
+          export THEOS="$HOME/theos"
+          # 官方 theos 没有 roothide scheme，必须用 roothide 分支
+          git clone --recursive https://github.com/roothide/theos.git "$THEOS"
+          echo "THEOS=$THEOS" >> "$GITHUB_ENV"
+          ls "$THEOS" | head
+          ls "$THEOS/vendor/mod" | head
+
+      - name: Install iPhoneOS16.5 SDK
+        run: |
+          set -e
+          mkdir -p "$THEOS/sdks"
+          git clone --depth 1 --filter=blob:none --sparse https://github.com/theos/sdks.git "$RUNNER_TEMP/sdks"
+          cd "$RUNNER_TEMP/sdks"
+          git sparse-checkout set iPhoneOS16.5.sdk
+          mv iPhoneOS16.5.sdk "$THEOS/sdks/"
+          ls -la "$THEOS/sdks"
+
+      - name: Show environment
+        run: |
+          echo "THEOS=$THEOS"
+          gmake --version | head -1
+          make --version | head -1
+
+      - name: Preflight
+        run: |
+          set -e
+          FAIL=0
+          for f in Makefile control Tweak.xm WXKBLiquidGlass.plist; do
+            [ -f "$f" ] || { echo "缺少 $f"; FAIL=1; }
+          done
+          if grep -q $'\r' control 2>/dev/null; then echo "control 含 CRLF"; FAIL=1; fi
+          H=$(grep -cE '^%hook' Tweak.xm || true)
+          G=$(grep -cE '^%group' Tweak.xm || true)
+          E=$(grep -cE '^%end' Tweak.xm || true)
+          echo "hook=$H group=$G end=$E"
+          [ "$E" -eq $((H + G)) ] || { echo "Logos 块不配平"; FAIL=1; }
+          grep -q '@interface UIInputSetContainerView' Tweak.xm || { echo "缺少 UIInputSetContainerView 声明"; FAIL=1; }
+          CV=$(grep -E '^Version:' control | awk '{print $2}')
+          XV=$(grep -oE 'kVersion = @"[^"]+"' Tweak.xm | grep -oE '[0-9]+\.[0-9]+\.[0-9]+')
+          echo "control=$CV tweak=$XV"
+          [ "$CV" = "$XV" ] || { echo "版本号不一致"; FAIL=1; }
+          [ "$FAIL" -ne 0 ] && { echo "静态自检未通过"; exit 1; }
+          echo "静态自检通过"
+          exit 0
+
+      - name: Build package
+        run: |
+          set -e
+          # 绝不接 `| tail`：管道会吞掉退出码，scheme 报错也会显示 success
+          gmake package THEOS_PACKAGE_SCHEME=roothide FINALPACKAGE=1
+          ls -la packages/
+
+      - name: Verify package
+        run: |
+          python3 - <<'PY'
+          import glob, io, os, struct, tarfile, lzma, gzip
+
+          def untar(raw):
+              if raw[:3] == b"\x5d\x00\x00":
+                  raw = lzma.decompress(raw, format=lzma.FORMAT_ALONE)
+              elif raw[:2] == b"\x1f\x8b":
+                  raw = gzip.decompress(raw)
+              elif raw[:6] == b"\xfd7zXZ\x00":
+                  raw = lzma.decompress(raw)
+              return tarfile.open(fileobj=io.BytesIO(raw))
+
+          debs = sorted(glob.glob("packages/*.deb"))
+          if not debs:
+              raise SystemExit("没有生成 deb")
+          path = debs[-1]
+          raw = open(path, "rb").read()
+          print("deb:", path, len(raw), "bytes")
+          assert raw[:8] == b"!<arch>\n", "不是 ar 格式"
+
+          off, members = 8, {}
+          while off + 60 <= len(raw):
+              hdr = raw[off:off + 60]
+              name = hdr[0:16].decode().strip()
+              size = int(hdr[48:58].decode().strip())
+              off += 60
+              members[name] = raw[off:off + size]
+              off += size + (size % 2)
+          print("ar members:", list(members.keys()))
+
+          ctrl = {}
+          for n in members:
+              if n.startswith("control.tar"):
+                  tf = untar(members[n])
+                  for m in tf.getmembers():
+                      print("  control/", m.name, m.size, oct(m.mode))
+                      if m.name.lstrip("./") == "control":
+                          txt = tf.extractfile(m).read().decode()
+                          print("---- control ----")
+                          print(txt)
+                          for line in txt.splitlines():
+                              if ":" in line:
+                                  k, v = line.split(":", 1)
+                                  ctrl[k.strip()] = v.strip()
+                  break
+
+          ver, arch = ctrl.get("Version", "?"), ctrl.get("Architecture", "?")
+          assert arch == "iphoneos-arm64e", "Architecture 不是 iphoneos-arm64e（roothide 会拒装）: %s" % arch
+          assert "_iphoneos-arm64e.deb" in path, "deb 文件名后缀不对: %s" % path
+          assert ver != "?", "control 里没有 Version"
+
+          data = [n for n in members if n.startswith("data.tar")]
+          assert data, "没有 data.tar"
+          tf = untar(members[data[0]])
+          print("---- payload ----")
+          for m in tf.getmembers():
+              if m.isdir():
+                  continue
+              print("  ", m.name, m.size)
+              if m.name.endswith(".dylib"):
+                  d = tf.extractfile(m).read()
+                  if d[:4] in (b"\xca\xfe\xba\xbe", b"\xca\xfe\xba\xbf"):
+                      n = struct.unpack(">I", d[4:8])[0]
+                      p, sl = 8, []
+                      for _ in range(n):
+                          ct, cs, o, sz, al = struct.unpack(">IIIII", d[p:p + 20])
+                          p += 20
+                          sl.append((ct, cs & 0x00FFFFFF))
+                      names = ["arm64" if cs == 0 else ("arm64e" if cs == 2 else "sub%d" % cs) for ct, cs in sl]
+                      print("     slices:", names, ["0x%08x" % ct for ct, _ in sl])
+                      assert "arm64" in names and "arm64e" in names, "缺少 arm64/arm64e 切片: %s" % names
+                  else:
+                      print("     thin (magic %s)" % d[:4].hex())
+
+          print("校验通过: Version=%s Architecture=%s" % (ver, arch))
+          PY
+
+      - name: Upload package
+        uses: actions/upload-artifact@v4
+        with:
+          name: WXKBLiquidGlass-deb
+          path: packages/*.deb
